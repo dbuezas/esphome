@@ -9,7 +9,42 @@ namespace esphome {
 namespace esp32_ble_client {
 
 static const char *const TAG = "esp32_ble_client";
-
+static const char *esp_key_type_to_str(esp_ble_key_type_t key_type) {
+  const char *key_str = NULL;
+  switch (key_type) {
+    case ESP_LE_KEY_NONE:
+      key_str = "ESP_LE_KEY_NONE";
+      break;
+    case ESP_LE_KEY_PENC:
+      key_str = "ESP_LE_KEY_PENC";
+      break;
+    case ESP_LE_KEY_PID:
+      key_str = "ESP_LE_KEY_PID";
+      break;
+    case ESP_LE_KEY_PCSRK:
+      key_str = "ESP_LE_KEY_PCSRK";
+      break;
+    case ESP_LE_KEY_PLK:
+      key_str = "ESP_LE_KEY_PLK";
+      break;
+    case ESP_LE_KEY_LLK:
+      key_str = "ESP_LE_KEY_LLK";
+      break;
+    case ESP_LE_KEY_LENC:
+      key_str = "ESP_LE_KEY_LENC";
+      break;
+    case ESP_LE_KEY_LID:
+      key_str = "ESP_LE_KEY_LID";
+      break;
+    case ESP_LE_KEY_LCSRK:
+      key_str = "ESP_LE_KEY_LCSRK";
+      break;
+    default:
+      key_str = "INVALID BLE KEY TYPE";
+      break;
+  }
+  return key_str;
+}
 void BLEClientBase::setup() {
   auto ret = esp_ble_gattc_app_register(this->app_id);
   if (ret) {
@@ -48,10 +83,10 @@ bool BLEClientBase::parse_device(const espbt::ESPBTDevice &device) {
 }
 
 std::string BLEClientBase::address_str() const {
-  return str_snprintf("%02x:%02x:%02x:%02x:%02x:%02x", 17, (uint8_t)(this->address_ >> 40) & 0xff,
-                      (uint8_t)(this->address_ >> 32) & 0xff, (uint8_t)(this->address_ >> 24) & 0xff,
-                      (uint8_t)(this->address_ >> 16) & 0xff, (uint8_t)(this->address_ >> 8) & 0xff,
-                      (uint8_t)(this->address_ >> 0) & 0xff);
+  return str_snprintf("%02x:%02x:%02x:%02x:%02x:%02x", 17, (uint8_t) (this->address_ >> 40) & 0xff,
+                      (uint8_t) (this->address_ >> 32) & 0xff, (uint8_t) (this->address_ >> 24) & 0xff,
+                      (uint8_t) (this->address_ >> 16) & 0xff, (uint8_t) (this->address_ >> 8) & 0xff,
+                      (uint8_t) (this->address_ >> 0) & 0xff);
 }
 
 void BLEClientBase::connect() {
@@ -76,6 +111,13 @@ void BLEClientBase::gattc_event_handler(esp_gattc_cb_event_t event, esp_gatt_if_
     case ESP_GATTC_REG_EVT: {
       if (param->reg.status == ESP_GATT_OK) {
         ESP_LOGV(TAG, "gattc registered app id %d", this->app_id);
+        esp_err_t ret = esp_ble_gap_config_local_privacy(true);
+        if (ret == ESP_OK) {
+          ESP_LOGI(TAG, "set privacy ok %d", this->app_id);
+        } else {
+          ESP_LOGE(TAG, "setting privacy failed %d", this->app_id);
+        }
+
         this->gattc_if_ = esp_gattc_if;
       } else {
         ESP_LOGE(TAG, "gattc app registration failed id=%d code=%d", param->reg.app_id, param->reg.status);
@@ -191,10 +233,48 @@ void BLEClientBase::gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_
       } else {
         ESP_LOGV(TAG, "auth success. address type = %d auth mode = %d", param->ble_security.auth_cmpl.addr_type,
                  param->ble_security.auth_cmpl.auth_mode);
+        ESP_LOGI(TAG, "address type = %d", param->ble_security.auth_cmpl.addr_type);
+        ESP_LOGI(TAG, "pair status = %s", param->ble_security.auth_cmpl.success ? "success" : "fail");
       }
+
       break;
     // There are other events we'll want to implement at some point to support things like pass key
     // https://github.com/espressif/esp-idf/blob/cba69dd088344ed9d26739f04736ae7a37541b3a/examples/bluetooth/bluedroid/ble/gatt_security_client/tutorial/Gatt_Security_Client_Example_Walkthrough.md
+    case ESP_GAP_BLE_SET_LOCAL_PRIVACY_COMPLETE_EVT:
+      if (param->local_privacy_cmpl.status != ESP_BT_STATUS_SUCCESS) {
+        ESP_LOGE(TAG, "config local privacy failed, error code =%x", param->local_privacy_cmpl.status);
+        break;
+      }
+      ESP_LOGD(TAG, "config local privacy success. should scan now, but i don't have the params");
+      // esp_err_t scan_ret = esp_ble_gap_set_scan_params(&ble_scan_params);
+      // if (scan_ret) {
+      //   ESP_LOGE(TAG, "set scan params error, error code = %x", scan_ret);
+      // }
+      break;
+    case ESP_GAP_BLE_SCAN_PARAM_SET_COMPLETE_EVT: {
+      // the unit of the duration is second
+      uint32_t duration = 30;
+      esp_ble_gap_start_scanning(duration);
+      break;
+    }
+    case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT:
+      // scan start complete event to indicate scan start successfully or failed
+      if (param->scan_start_cmpl.status != ESP_BT_STATUS_SUCCESS) {
+        ESP_LOGE(TAG, "scan start failed, error status = %x", param->scan_start_cmpl.status);
+        break;
+      }
+      ESP_LOGI(TAG, "Scan start success");
+      break;
+    case ESP_GAP_BLE_PASSKEY_NOTIF_EVT:  /// the app will receive this evt when the IO  has Output capability and the
+                                         /// peer device IO has Input capability.
+      /// show the passkey number to the user to input it in the peer device.
+      ESP_LOGI(TAG, "The passkey Notify number:%06d", param->ble_security.key_notif.passkey);
+      break;
+    case ESP_GAP_BLE_KEY_EVT:
+      // shows the ble key info share with peer device to the user.
+      ESP_LOGI(TAG, "key type = %s", esp_key_type_to_str(param->ble_security.ble_key.key_type));
+      break;
+
     default:
       break;
   }
@@ -233,16 +313,16 @@ float BLEClientBase::parse_char_value(uint8_t *value, uint16_t length) {
     case 0xD:  // int12.
     case 0xE:  // int16.
       if (length > 2) {
-        return (float) ((int16_t)(value[1] << 8) + (int16_t) value[2]);
+        return (float) ((int16_t) (value[1] << 8) + (int16_t) value[2]);
       }
     case 0xF:  // int24.
       if (length > 3) {
-        return (float) ((int32_t)(value[1] << 16) + (int32_t)(value[2] << 8) + (int32_t)(value[3]));
+        return (float) ((int32_t) (value[1] << 16) + (int32_t) (value[2] << 8) + (int32_t) (value[3]));
       }
     case 0x10:  // int32.
       if (length > 4) {
-        return (float) ((int32_t)(value[1] << 24) + (int32_t)(value[2] << 16) + (int32_t)(value[3] << 8) +
-                        (int32_t)(value[4]));
+        return (float) ((int32_t) (value[1] << 24) + (int32_t) (value[2] << 16) + (int32_t) (value[3] << 8) +
+                        (int32_t) (value[4]));
       }
   }
   ESP_LOGW(TAG, "Cannot parse characteristic value of type 0x%x length %d", value[0], length);
